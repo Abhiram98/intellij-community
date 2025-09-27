@@ -23,7 +23,7 @@ public final class DefaultGradleLightBuild implements GradleLightBuild, Serializ
   private final @NotNull DefaultGradleLightProject myRootProject;
   private final @NotNull List<DefaultGradleLightProject> myProjects;
 
-  private @Nullable DefaultBuildIdentifier myParentBuildIdentifier = null;
+  private @Nullable DefaultBuildIdentifier myParentBuild = null;
 
   public DefaultGradleLightBuild(@NotNull GradleBuild gradleBuild) {
     BasicGradleProject rootGradleProject = gradleBuild.getRootProject();
@@ -67,11 +67,11 @@ public final class DefaultGradleLightBuild implements GradleLightBuild, Serializ
 
   @Override
   public @Nullable DefaultBuildIdentifier getParentBuildIdentifier() {
-    return myParentBuildIdentifier;
+    return myParentBuild;
   }
 
   public void setParentBuildIdentifier(@Nullable DefaultBuildIdentifier parentBuildIdentifier) {
-    myParentBuildIdentifier = parentBuildIdentifier;
+    myParentBuild = parentBuildIdentifier;
   }
 
   @Override
