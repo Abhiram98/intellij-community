@@ -3608,7 +3608,7 @@ public abstract class K1JSBasicCompletionTestGenerated extends AbstractK1JSBasic
             }
 
             @TestMetadata("InsideAnonymousObject.kt")
-            public void testInsideAnonymousObject() throws Exception {
+            public void testInsideAnonymousObjectPublic() throws Exception {
                 runTest("../testData/basic/common/InsideAnonymousObject.kt");
             }
 
