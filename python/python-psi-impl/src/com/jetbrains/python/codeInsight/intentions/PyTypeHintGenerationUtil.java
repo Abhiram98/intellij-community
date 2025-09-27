@@ -442,7 +442,7 @@ public final class PyTypeHintGenerationUtil {
 
   public static final class AnnotationInfo {
     private final String myAnnotationText;
-    private final List<PyType> myTypes;
+    private final List<PyType> myFullyQualifiedTypeHints;
     private final List<TextRange> myTypeRanges;
 
     public AnnotationInfo(@NotNull String annotationText) {
@@ -455,7 +455,7 @@ public final class PyTypeHintGenerationUtil {
 
     public AnnotationInfo(@NotNull String annotationText, @NotNull List<PyType> types, @NotNull List<TextRange> typeRanges) {
       myAnnotationText = annotationText;
-      myTypes = types;
+      myFullyQualifiedTypeHints = types;
       myTypeRanges = typeRanges;
     }
 
@@ -464,7 +464,7 @@ public final class PyTypeHintGenerationUtil {
     }
 
     public @NotNull List<PyType> getTypes() {
-      return myTypes;
+      return myFullyQualifiedTypeHints;
     }
 
     public @NotNull List<TextRange> getTypeRanges() {
