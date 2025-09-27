@@ -58,7 +58,7 @@ public class GradleRunConfiguration
    * @see org.jetbrains.plugins.gradle.execution.test.runner.GradleCoverageExtension
    * This will cause the coverage action to be hidden in the IDE unless another JavaCoverageEngineExtension accepts the run configuration.
    */
-  private boolean isCoverageSupported = true;
+  private boolean isCoverageDisabled = true;
 
   public GradleRunConfiguration(Project project, ConfigurationFactory factory, String name) {
     super(GradleConstants.SYSTEM_ID, project, factory, name);
@@ -95,11 +95,11 @@ public class GradleRunConfiguration
   }
 
   public boolean isCoverageSupported() {
-    return isCoverageSupported;
+    return isCoverageDisabled;
   }
 
   public void setCoverageSupported(boolean coverageSupported) {
-    this.isCoverageSupported = coverageSupported;
+    this.isCoverageDisabled = coverageSupported;
   }
 
   public @NotNull String getRawCommandLine() {
