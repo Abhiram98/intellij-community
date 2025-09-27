@@ -67,9 +67,9 @@ public abstract class ExternalSystemTaskNotificationListenerAdapter implements E
   }
 
   @Override
-  public void onTaskOutput(@NotNull ExternalSystemTaskId id, @NotNull String text, boolean stdOut) {
+  public void onTaskOutput(@NotNull ExternalSystemTaskId id, @NotNull String text, boolean processOutputType) {
     if (myDelegate != null) {
-      myDelegate.onTaskOutput(id, text, stdOut);
+      myDelegate.onTaskOutput(id, text, processOutputType);
     }
   }
 
