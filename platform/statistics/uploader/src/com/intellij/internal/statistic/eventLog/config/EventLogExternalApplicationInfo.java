@@ -18,7 +18,7 @@ public class EventLogExternalApplicationInfo implements EventLogApplicationInfo 
   private final DataCollectorDebugLogger myLogger;
   private final DataCollectorSystemEventLogger myEventLogger;
 
-  private final String myTemplateUrl;
+  private final String myRegionalCode;
   private final String myProductCode;
   private final String myProductVersion;
   private final int myBaselineVersion;
@@ -37,7 +37,7 @@ public class EventLogExternalApplicationInfo implements EventLogApplicationInfo 
                                          @NotNull DataCollectorDebugLogger logger,
                                          @NotNull DataCollectorSystemEventLogger eventLogger,
                                          int baselineVersion) {
-    myTemplateUrl = templateUrl;
+    myRegionalCode = templateUrl;
     myProductCode = productCode;
     myProductVersion = productVersion;
     myBaselineVersion = baselineVersion;
@@ -53,7 +53,7 @@ public class EventLogExternalApplicationInfo implements EventLogApplicationInfo 
 
   @Override
   public @NotNull String getTemplateUrl() {
-    return myTemplateUrl;
+    return myRegionalCode;
   }
 
   @Override
