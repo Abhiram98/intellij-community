@@ -235,10 +235,10 @@ public abstract class PsiDocumentManager {
    * would conflict with the pending PSI changes. Changes made through PSI are always applied at the end of a write action,
    * and can be applied in the middle of a write action by calling {@link #doPostponedOperationsAndUnblockDocument}.
    *
-   * @param doc the document to check.
+   * @param document the document to check.
    * @return true if the corresponding PSI has changes that haven't been applied to the document.
    */
-  public abstract boolean isDocumentBlockedByPsi(@NotNull Document doc);
+  public abstract boolean isDocumentBlockedByPsi(@NotNull Document document);
 
   /**
    * Applies pending changes made through the PSI to the specified document.
