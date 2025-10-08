@@ -24,7 +24,7 @@ public final class PySyntaxAnnotator extends PyAnnotatorBase implements DumbAwar
       new PyAstNumericLiteralAnnotatorVisitor(holder),
       new PyGeneratorInArgumentListAnnotator(holder),
       new PyStarAnnotator(holder),
-      new PyStringLiteralQuotesAnnotator(holder),
+      new PyStringLiteralQuotesAnnotatorVisitor(holder),
       new PyFStringsAnnotator(holder),
       new PyPatternAnnotator(holder),
       new PyTryExceptAnnotator(holder),
