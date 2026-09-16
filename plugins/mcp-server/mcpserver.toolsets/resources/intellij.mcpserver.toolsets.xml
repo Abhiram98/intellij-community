@@ -30,6 +30,11 @@
     <module name="intellij.platform.util.coroutines"/>
     <module name="intellij.platform.util.ex"/>
     <module name="intellij.platform.util.ui"/>
+    <module name="intellij.java"/>
+    <module name="intellij.java.psi"/>
+    <module name="intellij.java.psi.impl"/>
+    <module name="intellij.java.impl.refactorings"/>
+    <module name="intellij.java.frontback.psi"/>
   </dependencies>
   <!-- endregion -->
   <extensions defaultExtensionNs="com.intellij">
@@ -44,6 +49,7 @@
     <mcpServer.mcpToolset implementation="com.intellij.mcpserver.toolsets.general.SearchToolset" />
     <mcpServer.mcpToolset implementation="com.intellij.mcpserver.toolsets.general.CodeInsightToolset" />
     <mcpServer.mcpToolset implementation="com.intellij.mcpserver.toolsets.general.RefactoringToolset" />
+    <mcpServer.mcpToolset implementation="com.intellij.mcpserver.toolsets.general.MoveMethodToolset" />
     <mcpServer.mcpToolset implementation="com.intellij.mcpserver.toolsets.general.DiagnosticsToolset" />
   </extensions>
 </idea-plugin>
