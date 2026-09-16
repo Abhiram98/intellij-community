@@ -194,6 +194,8 @@ public final class AboutDialog extends DialogWrapper {
       myInfo.add("Source revision: " + revision.getValue());
     }
     lines.add("");
+    lines.add("— IntelliJ MCP-Refactoring");
+    lines.add("");
 
     if (PlatformUtils.isCommunityEdition()) {
       lines.add(IdeBundle.message("about.box.oss.build"));

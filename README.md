@@ -113,6 +113,44 @@ Installer build examples:
 > 
 > The `installers.cmd` is used to run [OpenSourceCommunityInstallersBuildTarget](build/src/OpenSourceCommunityInstallersBuildTarget.kt) from the command line.
 > You can also call it directly from IDEA, using run configuration `Build IntelliJ IDEA Installers (current OS)`.
+> Equivalently, run the build target via Bazel directly. Note that every argument after `--`
+> is passed to the build target prefixed with `--jvm_flag=`:
+> ```shell
+> ./bazel.cmd run //build:i_build_target -- --jvm_flag=-Dintellij.build.target.os=current
+> ```
+
+> [!IMPORTANT]
+>
+> **Where the build output goes.** The build output root is `out/idea-ce/` (not the plain `out/`):
+> * Finished installers are written to `out/idea-ce/artifacts/`, e.g. `ideaIC-<version>-aarch64.dmg`
+>   and a universal `.dmg`/`.sit` on macOS.
+> * JPS build logs live in `out/idea-ce/log`, and the build target's console output is useful for
+>   diagnosing failures.
+> * Intermediate distribution pieces are staged in `out/idea-ce/dist.all/` (shared `lib/` with all
+>   jars, `bin/`, `plugins/`) and `out/idea-ce/dist.mac.aarch64/` (macOS-specific overlay: `Info.plist`,
+>   `MacOS/`, `Resources/` — no `lib/`). The product `.app` bundle is the two overlaid.
+
+> [!IMPORTANT]
+>
+> **On memory-limited machines** (e.g. 16 GB RAM), the Bazel server plus 2×CPU compile workers
+> routinely exhaust memory and the build gets killed mid-compile. Cap the server heap, the job
+> count, and per-worker multiplexing. `--host_jvm_args` is a *startup* option and must come before
+> the `run` subcommand:
+> ```shell
+> ./bazel.cmd --host_jvm_args=-Xmx2g run --jobs=4 --worker_max_multiplex_instances=2 -- //build:i_build_target -- --jvm_flag=-Xmx3g -Dintellij.build.target.os=current
+> ```
+> Expect swap usage to climb (tens of GB) on such machines even with these caps.
+
+> [!IMPORTANT]
+>
+> **Apple macOS SDK download.** During analysis, the build fetches `CLTools_macOSNMOS_SDK.pkg`
+> from the JetBrains download redirector, which can return `401 Unauthorized` (the Apple CDN itself
+> returns 403). Workaround: copy `build/bazel_downloader.cfg` to e.g. `out/downloader.cfg` (an
+> untracked file), add the line `allow web.archive.org`, and pass the config to Bazel:
+> ```shell
+> ./bazel.cmd --downloader_config="$PWD/out/downloader.cfg" run //build:i_build_target ...
+> ```
+> `web.archive.org` serves the same `...id_/...` SDK URL (also listed as a fallback in `MODULE.bazel`).
 
 ### Dockerized Build Environment
 
@@ -143,6 +181,36 @@ To run tests on the build, apply these settings to the _Run | Edit Configuration
 ```shell
 ./bazel.cmd run //build:idea_community
 ```
+
+### Running the built installer (macOS `.app` bundle)
+
+The `.dmg`/`.sit` installers in `out/idea-ce/artifacts/` contain a complete application bundle, e.g.:
+
+```shell
+open out/idea-ce/artifacts/ideaIC-263.SNAPSHOT-aarch64.dmg          # mounts at /Volumes/IntelliJ IDEA OSS
+open "/Volumes/IntelliJ IDEA OSS/IntelliJ IDEA OSS.app"             # launches the app
+```
+
+> [!IMPORTANT]
+>
+> **The launcher runs the JVM in-process.** The `Contents/MacOS/idea` launcher (Rust "XPlat"
+> launcher) creates the JVM via JNI inside its own process — a separate `java` child process never
+> appears, so don't wait for one (`jstat`/`top`/`pgrep` for `jbr/.../bin/java` will find nothing).
+> The bundled runtime is at `Contents/jbr/Contents/Home/bin/java` if you need to poke at it directly.
+
+> [!IMPORTANT]
+>
+> **Possible startup deadlock: `PerfMemory::initialize` → `open_directory_secure_cwd`.**
+> On some macOS setups the freshly built app hangs at JVM init with no window (the launcher process
+> sits spinning with no children). Workaround: disable the perf-memory subsystem via user vmoptions
+> (no need to touch the bundle, which lives on a read-only DMG):
+> ```shell
+> mkdir -p "$HOME/Library/Application Support/JetBrains/IdeaIC2026.3"
+> printf -- '-XX:-UsePerfData\n' > "$HOME/Library/Application Support/JetBrains/IdeaIC2026.3/idea.vmoptions"
+> open "/Volumes/IntelliJ IDEA OSS/IntelliJ IDEA OSS.app"
+> ```
+> (`JAVA_TOOL_OPTIONS=-XX:-UsePerfData` at launch also works — JNI-created VMs honor it, while
+> `JDK_JAVA_OPTIONS` does not.)
 
 ### Running IntelliJ IDEA in a CI/CD environment
 
