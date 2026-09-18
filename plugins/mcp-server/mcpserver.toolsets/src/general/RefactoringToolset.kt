@@ -46,6 +46,7 @@ import com.intellij.psi.PsiPackage
 import com.intellij.psi.PsiParameter
 import com.intellij.psi.PsiRecursiveElementVisitor
 import com.intellij.psi.PsiReference
+import com.intellij.psi.PsiReferenceExpression
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.searches.ClassInheritorsSearch
 import com.intellij.psi.search.searches.MethodReferencesSearch
