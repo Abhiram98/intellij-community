@@ -5,7 +5,7 @@ package com.intellij.mcpserver.toolsets
 
 import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.mcpserver.GeneralMcpToolsetTestBase
-import com.intellij.mcpserver.toolsets.general.ExtractMethodToolset
+import com.intellij.mcpserver.toolsets.general.RefactoringToolset
 import com.intellij.openapi.application.EDT
 import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.fileEditor.FileDocumentManager
@@ -66,7 +66,7 @@ class ExtractMethodToolsetTest : GeneralMcpToolsetTestBase() {
     assumeTrue(isJavaPluginInstalled(), "Java plugin is required for this test")
 
     testMcpTool(
-      ExtractMethodToolset::extract_method.name,
+      RefactoringToolset::extract_method.name,
       extractMethodArgs(
         startLine = 3,
         endLine = 4,
@@ -97,7 +97,7 @@ class ExtractMethodToolsetTest : GeneralMcpToolsetTestBase() {
     assumeTrue(isJavaPluginInstalled(), "Java plugin is required for this test")
 
     testMcpTool(
-      ExtractMethodToolset::extract_method.name,
+      RefactoringToolset::extract_method.name,
       extractMethodArgs(startLine = 3, endLine = 4),
     ) { result ->
       assertThat(result.isError).isFalse()
@@ -115,7 +115,7 @@ class ExtractMethodToolsetTest : GeneralMcpToolsetTestBase() {
 
     // Line 4 is `      int incremented = doubled + 1;`: `doubled + 1` spans columns 23..33.
     testMcpTool(
-      ExtractMethodToolset::extract_method.name,
+      RefactoringToolset::extract_method.name,
       extractMethodArgs(
         startLine = 4,
         startColumn = 23,
@@ -139,7 +139,7 @@ class ExtractMethodToolsetTest : GeneralMcpToolsetTestBase() {
     // `int a = 1; int b = 2;` both live on after the fragment (line 5 reads both), so the fragment has
     // two output variables and cannot be extracted as a method returning a single value.
     testMcpTool(
-      ExtractMethodToolset::extract_method.name,
+      RefactoringToolset::extract_method.name,
       extractMethodArgs(
         startLine = 3,
         endLine = 4,
@@ -154,7 +154,7 @@ class ExtractMethodToolsetTest : GeneralMcpToolsetTestBase() {
     }
 
     testMcpTool(
-      ExtractMethodToolset::extract_method.name,
+      RefactoringToolset::extract_method.name,
       extractMethodArgs(
         startLine = 3,
         endLine = 4,
@@ -175,7 +175,7 @@ class ExtractMethodToolsetTest : GeneralMcpToolsetTestBase() {
     assumeTrue(isJavaPluginInstalled(), "Java plugin is required for this test")
 
     testMcpTool(
-      ExtractMethodToolset::extract_method.name,
+      RefactoringToolset::extract_method.name,
       extractMethodArgs(startLine = 3, endLine = 4, methodName = "not valid"),
     ) { result ->
       assertThat(result.isError).isTrue()
@@ -188,7 +188,7 @@ class ExtractMethodToolsetTest : GeneralMcpToolsetTestBase() {
     assumeTrue(isJavaPluginInstalled(), "Java plugin is required for this test")
 
     testMcpTool(
-      ExtractMethodToolset::extract_method.name,
+      RefactoringToolset::extract_method.name,
       extractMethodArgs(startLine = 999, endLine = 1000),
     ) { result ->
       assertThat(result.isError).isTrue()

@@ -49,8 +49,6 @@
     <mcpServer.mcpToolset implementation="com.intellij.mcpserver.toolsets.general.SearchToolset" />
     <mcpServer.mcpToolset implementation="com.intellij.mcpserver.toolsets.general.CodeInsightToolset" />
     <mcpServer.mcpToolset implementation="com.intellij.mcpserver.toolsets.general.RefactoringToolset" />
-    <mcpServer.mcpToolset implementation="com.intellij.mcpserver.toolsets.general.MoveMethodToolset" />
-    <mcpServer.mcpToolset implementation="com.intellij.mcpserver.toolsets.general.ExtractMethodToolset" />
     <mcpServer.mcpToolset implementation="com.intellij.mcpserver.toolsets.general.DiagnosticsToolset" />
   </extensions>
 </idea-plugin>
