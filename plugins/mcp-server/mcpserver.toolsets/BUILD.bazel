@@ -57,7 +57,10 @@ jvm_library(
         "//platform/util/coroutines",
         "//java/java-frontback-psi-api:frontback-psi",
         "//java/java-psi-api:psi",
+        "//java/java-indexing-api:indexing",
+        "//java/java-impl:impl",
         "//java/java-impl-refactorings:impl-refactorings",
+        "//libraries/fastutil:fastutil",
     ],
 )
 
@@ -106,7 +109,10 @@ jvm_library(
         "//java/java-frontback-psi-api:frontback-psi_test_lib",
         "//java/java-psi-api:psi_test_lib",
         "//java/java-psi-impl:psi-impl_test_lib",
+        "//java/java-indexing-api:indexing_test_lib",
+        "//java/java-impl:impl_test_lib",
         "//java/java-impl-refactorings:impl-refactorings_test_lib",
+        "//libraries/fastutil:fastutil_test_lib",
     ],
 )
 ### auto-generated section `build intellij.mcpserver.toolsets` end

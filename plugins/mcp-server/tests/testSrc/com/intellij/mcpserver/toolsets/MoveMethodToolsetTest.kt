@@ -5,7 +5,7 @@ package com.intellij.mcpserver.toolsets
 
 import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.mcpserver.GeneralMcpToolsetTestBase
-import com.intellij.mcpserver.toolsets.general.RefactoringToolset
+import com.intellij.mcpserver.toolsets.general.MoveMethodToolset
 import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.project.DumbService
 import com.intellij.testFramework.junit5.fixture.virtualFileFixture
@@ -75,7 +75,7 @@ class MoveMethodToolsetTest : GeneralMcpToolsetTestBase() {
     assumeTrue(isJavaPluginInstalled(), "Java plugin is required for this test")
 
     testMcpTool(
-      RefactoringToolset::move_method.name,
+      MoveMethodToolset::move_method.name,
       moveMethodArgs(methodName = "staticMoveMe"),
     ) { result ->
       assertThat(result.isError).isFalse()
@@ -89,7 +89,7 @@ class MoveMethodToolsetTest : GeneralMcpToolsetTestBase() {
 
     // the method is gone from its old location
     testMcpTool(
-      RefactoringToolset::move_method.name,
+      MoveMethodToolset::move_method.name,
       moveMethodArgs(methodName = "staticMoveMe"),
     ) { result ->
       assertThat(result.isError).isTrue()
@@ -102,7 +102,7 @@ class MoveMethodToolsetTest : GeneralMcpToolsetTestBase() {
     assumeTrue(isJavaPluginInstalled(), "Java plugin is required for this test")
 
     testMcpTool(
-      RefactoringToolset::move_method.name,
+      MoveMethodToolset::move_method.name,
       moveMethodArgs(methodName = "instanceMoveMe"),
     ) { result ->
       assertThat(result.isError).isFalse()
@@ -114,7 +114,7 @@ class MoveMethodToolsetTest : GeneralMcpToolsetTestBase() {
     }
 
     testMcpTool(
-      RefactoringToolset::move_method.name,
+      MoveMethodToolset::move_method.name,
       moveMethodArgs(methodName = "instanceMoveMe"),
     ) { result ->
       assertThat(result.isError).isTrue()
@@ -127,7 +127,7 @@ class MoveMethodToolsetTest : GeneralMcpToolsetTestBase() {
     assumeTrue(isJavaPluginInstalled(), "Java plugin is required for this test")
 
     testMcpTool(
-      RefactoringToolset::move_method.name,
+      MoveMethodToolset::move_method.name,
       moveMethodArgs(methodName = "greet"),
     ) { result ->
       assertThat(result.isError).isFalse()
@@ -142,7 +142,7 @@ class MoveMethodToolsetTest : GeneralMcpToolsetTestBase() {
     assumeTrue(isJavaPluginInstalled(), "Java plugin is required for this test")
 
     testMcpTool(
-      RefactoringToolset::move_method.name,
+      MoveMethodToolset::move_method.name,
       moveMethodArgs(targetClass = "pkg.Nonexistent"),
     ) { result ->
       assertThat(result.isError).isTrue()

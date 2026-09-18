@@ -1,0 +1,336 @@
+// ============================================================================
+// Candidate implementation: `pull_up_method` MCP tool for RefactoringToolset.
+//
+// Splice target: plugins/mcp-server/mcpserver.toolsets/src/general/RefactoringToolset.kt
+// This file is `ktsrc` (NOT compiled by bazel) - it carries the exact code to
+// add, plus a short design note. The working tree is shared with parallel
+// agents: nothing except this candidate file was touched.
+//
+// DESIGN CHOICES
+// --------------
+// * API verified in this fork (package `com.intellij.refactoring.memberPullUp`):
+//     PullUpProcessor(@NotNull PsiClass sourceClass, PsiClass targetSuperClass,
+//                     MemberInfo[] membersToMove, DocCommentPolicy javaDocPolicy)
+//   Unlike move_method's processors there is no Project argument - the project is
+//   taken from `sourceClass.getProject()`. There is no `PullUpOptions` carrier in
+//   this fork; the per-member move spec is `MemberInfo` (checked flag + the
+//   production "make abstract" flag `setToAbstract(...)`), exactly what the dialog
+//   feeds the processor after the user clicks OK (see PullUpDialog.doAction ->
+//   `new PullUpProcessor(myClass, superClass, infos..., new DocCommentPolicy(...))`).
+// * Headless execution mirrors the existing move_method tool: a Processor subclass
+//   that disables EVERY UI hook - `isPreviewUsages` returns false, `showConflicts`
+//   throws a custom exception (the base implementation would silently *ignore*
+//   conflicts when `myPrepareSuccessfulSwingThreadCallback == null`, which is the
+//   case here), and the conflict/dependency gate is run *before* the move via the
+//   production analysis `PullUpConflictsUtil.checkConflicts(...)` (the exact call
+//   JavaPullUpHandler.checkConflicts makes before showing the dialog's OK).
+// * References to subclass members: the production dialog does NOT auto-select the
+//   members a checked method uses; instead `PullUpConflictsUtil` reports a conflict
+//   "X uses Y which is not moved to the superclass" (`ConflictingUsagesOfSubClassMembers`).
+//   The safe, production-matching default selected here is therefore ABORT with
+//   success=false listing the offending members - nothing is changed. Auto-pulling
+//   the referenced members along is NOT the production default, so it is not done.
+// * makeAbstract semantics are the real "Make abstract" option: the superclass
+//   receives an `abstract <sig>;` declaration and the CONCRETE implementation is
+//   left in the source class (now overriding it; `@Override` may be added). When
+//   makeAbstract=false the member is fully moved and deleted from the source
+//   (`JavaPullUpHelper.doMoveMethod` deletes the source method only in that case).
+//   The real placement constraint is on the TARGET class (host of the abstract
+//   declaration): it must be non-final (interfaces are fine) - guarded up front.
+// * Javadoc policy `DocCommentPolicy.ASIS` is used (plain Java-refactoring settings
+//   bean default: JavaRefactoringSettings.PULL_UP_MEMBERS_JAVADOC defaults to 0).
+// * Every index-backed lookup (findClass, findMethodsInFile, the conflicts
+//   analysis, usage search) is preceded by `DumbService.waitForSmartMode()` and is
+//   wrapped in read actions; the processor run is on `Dispatchers.EDT` inside
+//   `writeIntentReadAction` exactly like move_method.
+// * `snapshotChangedFilesAfterMove` (existing same-file helper) is reused for the
+//   changed-files report - it already snapshots usages + source + target files.
+// * Module dependency note: `com.intellij.refactoring.util.classMembers.MemberInfo`
+//   lives in **intellij.java.impl** (`java/java-impl`), which is NOT among the
+//   declared deps of mcpserver.toolsets (see the report). Everything else used is in
+//   already-declared modules (the pullUp machinery itself is
+//   `intellij.java.impl.refactorings`).
+// ============================================================================
+
+package com.intellij.mcpserver.toolsets.general
+
+// ---- NEW imports to insert into RefactoringToolset.kt (alphabetized; merge into
+// ---- the existing import block; everything else used below is already imported,
+// ---- e.g. PsiClass/PsiMethod/PsiModifier/PsiUtilCore/JavaPsiFacade/GlobalSearchScope,
+// ---- EDT/readAction/writeIntentReadAction, Dispatchers/withContext/currentCoroutineContext,
+// ---- MultiMap, UsageInfo, McpTool/McpDescription/Constants/McpServerBundle,
+// ---- reportToolActivity/project/mcpFail, Serializable, resolveProjectPsiFile,
+// ---- findMethodsInFile, snapshotChangedFilesAfterMove).
+
+import com.intellij.openapi.project.DumbService
+import com.intellij.psi.CommonClassNames
+import com.intellij.psi.JavaDirectoryService
+import com.intellij.psi.PsiCompiledElement
+import com.intellij.psi.PsiDirectory
+import com.intellij.psi.PsiPackage
+import com.intellij.refactoring.memberPullUp.PullUpConflictsUtil
+import com.intellij.refactoring.memberPullUp.PullUpProcessor
+import com.intellij.refactoring.util.DocCommentPolicy
+import com.intellij.refactoring.util.RefactoringHierarchyUtil
+import com.intellij.refactoring.util.classMembers.MemberInfo
+import com.intellij.refactoring.util.classMembers.UsesAndInterfacesDependencyMemberInfoModel
+
+// ============================================================================
+// ┌─ inside class RefactoringToolset : McpToolset {  (insert after extract_method)
+// ============================================================================
+
+  @McpTool
+  @McpDescription("""
+    Pulls a Java method up from its containing class into a superclass, updating all references
+    with it (IntelliJ "Pull Members Up" refactoring) - the member is moved, not copied.
+
+    The method is resolved by name in the given Java file; pass `parameterTypes` (e.g. ["String",
+    "int"]) to disambiguate overloads. The destination is the class named by `targetClass`; when
+    omitted, the direct superclass of the method's containing class is auto-detected.
+
+    `makeAbstract` selects the production "make abstract" option: the superclass receives an
+    `abstract <sig>;` declaration and the concrete implementation is left in the source class
+    (now overriding the abstract one). The default (false) removes the member from the source
+    class entirely.
+
+    When the method depends on members of its own class that are not being pulled up (the
+    production conflict analysis), the refactoring is aborted with success=false listing the
+    offending members - nothing is changed.
+
+    Returns a structured result with `success`, the moved members, the updated-usage count and
+    the list of changed files. Tool-level errors (missing file/method/class, uncompilable
+    destination) fail the tool call instead.
+    """)
+  suspend fun pull_up_method(
+    @McpDescription(Constants.RELATIVE_PATH_IN_PROJECT_DESCRIPTION)
+    pathInProject: String,
+    @McpDescription("Exact name of the method to pull up")
+    methodName: String,
+    @McpDescription("Optional parameter types to disambiguate overloaded methods, e.g. [\"String\", \"int\"]")
+    parameterTypes: List<String>? = null,
+    @McpDescription("Fully-qualified name of the destination superclass; defaults to the direct superclass of the method's containing class")
+    targetClass: String? = null,
+    @McpDescription("When true, the superclass receives an abstract declaration and the implementation stays in the source class (production \"make abstract\" option); when false (default) the member is removed from the source class")
+    makeAbstract: Boolean = false,
+  ): PullUpMethodResult {
+    currentCoroutineContext().reportToolActivity(McpServerBundle.message("tool.activity.pulling.up.method", methodName, targetClass ?: "auto-detected superclass", pathInProject))
+    val project = currentCoroutineContext().project
+    DumbService.getInstance(project).waitForSmartMode()
+
+    val psiFile = resolveProjectPsiFile(project, pathInProject)
+    if (psiFile !is PsiJavaFile) {
+      mcpFail("Only Java methods can be pulled up, but '$pathInProject' is not a Java file")
+    }
+
+    val matchingMethods = readAction {
+      findMethodsInFile(psiFile, methodName, parameterTypes)
+    }
+    if (matchingMethods.isEmpty()) {
+      mcpFail("Couldn't find method '$methodName' in file '$pathInProject'")
+    }
+    if (matchingMethods.size > 1) {
+      val signatures = matchingMethods.map { it.parameterList.parameters.map { p -> p.type.presentableText }.joinToString(", ", "(", ")") }
+      mcpFail("Several methods named '$methodName' found in '$pathInProject': $signatures. Pass `parameterTypes` to disambiguate.")
+    }
+    val method = matchingMethods[0]
+
+    val sourceClass = readAction { method.containingClass }
+                      ?: mcpFail("Method '$methodName' is not declared inside a class")
+    val sourceClassName = readAction { sourceClass.qualifiedName ?: sourceClass.name }
+                          ?: mcpFail("Cannot determine a name for the source class")
+
+    val targetPsiClass = readAction {
+      if (targetClass != null) {
+        JavaPsiFacade.getInstance(project).findClass(targetClass, GlobalSearchScope.projectScope(project))
+      }
+      else {
+        // The dialog preselects RefactoringHierarchyUtil.getNearestBaseClass (the extends class,
+        // preferring the first interface over java.lang.Object); fall back to the raw extends list.
+        RefactoringHierarchyUtil.getNearestBaseClass(sourceClass, false) ?: sourceClass.superClass
+      }
+    } ?: if (targetClass != null) {
+      mcpFail("Target class '$targetClass' not found in project")
+    }
+    else {
+      mcpFail("Cannot determine a superclass to pull '$methodName' up into: '$sourceClassName' has no base class in this project. Pass `targetClass` to select one explicitly.")
+    }
+
+    val targetName = readAction { targetPsiClass.qualifiedName ?: targetPsiClass.name }
+                     ?: mcpFail("Cannot determine a name for the target class")
+
+    if (readAction { targetPsiClass.qualifiedName } == CommonClassNames.JAVA_LANG_OBJECT) {
+      mcpFail("Cannot pull '$methodName' up into 'java.lang.Object'")
+    }
+    if (targetPsiClass == sourceClass) {
+      mcpFail("Method '$methodName' is already declared in the target class '$targetName'")
+    }
+    if (!readAction { sourceClass.isInheritor(targetPsiClass, true) }) {
+      mcpFail("Class '$sourceClassName' is not a subclass of target class '$targetName'")
+    }
+
+    // The producer's own flow only writes into project sources; a compiled/library or read-only
+    // destination would otherwise surface as a UI notification inside the processor, so reject it
+    // here with a clear tool-level error instead.
+    val targetFile = readAction { targetPsiClass.containingFile } ?: mcpFail("Cannot locate the file of target class '$targetName'")
+    if (targetFile is PsiCompiledElement) {
+      mcpFail("Target class '$targetName' is compiled (a library class); cannot pull members up into it")
+    }
+    val targetVirtualFile = readAction { PsiUtilCore.getVirtualFile(targetPsiClass) }
+                            ?: mcpFail("Cannot locate the file of target class '$targetName'")
+    if (!readAction { targetVirtualFile.isWritable }) {
+      mcpFail("Target class '$targetName' is not writable; cannot pull members up into it")
+    }
+
+    // The abstract declaration is added to the TARGET class by JavaPullUpHelper.doMoveMethod
+    // (RefactoringUtil.makeMethodAbstract), so a final superclass cannot host it. Interfaces are fine.
+    if (makeAbstract) {
+      val targetIsInterface = readAction { targetPsiClass.isInterface }
+      val targetIsFinal = readAction { targetPsiClass.hasModifierProperty(PsiModifier.FINAL) }
+      if (!targetIsInterface && targetIsFinal) {
+        return PullUpMethodResult(
+          success = false,
+          message = "Cannot pull '$methodName' up as abstract: target class '$targetName' is final. " +
+                    "Make the target non-final or retry with makeAbstract=false.",
+          methodName = methodName,
+          fromClass = sourceClassName,
+          toClass = targetName,
+        )
+      }
+    }
+
+    // The per-member move spec the processor consumes: checked + the production "make abstract" flag.
+    val memberInfo = readAction {
+      MemberInfo(method).apply {
+        setChecked(true)
+        setToAbstract(makeAbstract)
+      }
+    }
+    val memberInfos = arrayOf(memberInfo)
+
+    // Production conflict gate - identical to JavaPullUpHandler.checkConflicts
+    // (PullUpConflictsUtil.checkConflicts): catches a same-signature member already present in the
+    // superclass, accessibility problems, and references to subclass members that are not being
+    // pulled up ("X uses Y which is not moved to the superclass"). Any hit aborts with success=false
+    // and the list of offending members; nothing is changed.
+    val conflicts = readAction {
+      val targetDirectory = targetFile.containingDirectory
+      val targetPackage = if (targetDirectory != null) JavaDirectoryService.getInstance().getPackage(targetDirectory) else null
+      if (targetDirectory != null && targetPackage != null) {
+        PullUpConflictsUtil.checkConflicts(
+          memberInfos,
+          sourceClass,
+          targetPsiClass,
+          targetPackage,
+          targetDirectory,
+          UsesAndInterfacesDependencyMemberInfoModel.DEFAULT_CONTAINMENT_VERIFIER,
+        )
+      }
+      else {
+        MultiMap<PsiElement, String>()
+      }
+    }
+    if (!conflicts.isEmpty) {
+      return PullUpMethodResult(
+        success = false,
+        message = "Pull up of '$methodName' to '$targetName' aborted: ${conflicts.size} conflict(s) found",
+        methodName = methodName,
+        fromClass = sourceClassName,
+        toClass = targetName,
+        conflicts = conflicts.values().toList(),
+      )
+    }
+
+    val prepared = readAction {
+      val processor = McpPullUpProcessor(
+        sourceClass,
+        targetPsiClass,
+        arrayOf(memberInfo),
+        DocCommentPolicy(DocCommentPolicy.ASIS),
+      )
+      PreparedPullUp(processor, processor.findUsagesPublicly())
+    }
+
+    val changedFiles = readAction {
+      snapshotChangedFilesAfterMove(project, prepared.usages, sourceClass, targetPsiClass)
+    }
+
+    try {
+      withContext(Dispatchers.EDT) {
+        writeIntentReadAction {
+          prepared.processor.run()
+        }
+      }
+    }
+    catch (e: PullUpConflictsFoundException) {
+      return PullUpMethodResult(
+        success = false,
+        message = "Pull up of '$methodName' to '$targetName' aborted: ${e.conflicts.size} conflict(s) found",
+        methodName = methodName,
+        fromClass = sourceClassName,
+        toClass = targetName,
+        conflicts = e.conflicts,
+      )
+    }
+
+    val movedMemberNames = readAction {
+      prepared.processor.getMovedMembers().mapNotNull { it.name }.distinct()
+    }
+    return PullUpMethodResult(
+      success = true,
+      message = "Pulled '$methodName' up from $sourceClassName to $targetName; ${prepared.usages.size} usage(s) updated.",
+      methodName = methodName,
+      fromClass = sourceClassName,
+      toClass = targetName,
+      membersMoved = if (movedMemberNames.isEmpty()) listOf(methodName) else movedMemberNames,
+      referencesUpdated = prepared.usages.size,
+      changedFiles = changedFiles,
+    )
+  }
+
+// ── end inside class RefactoringToolset ──────────────────────────────────
+// ============================================================================
+
+@Serializable
+data class PullUpMethodResult(
+  val success: Boolean,
+  val message: String,
+  val methodName: String,
+  val fromClass: String,
+  val toClass: String,
+  val membersMoved: List<String> = emptyList(),
+  val referencesUpdated: Int = 0,
+  val changedFiles: List<String> = emptyList(),
+  val conflicts: List<String> = emptyList(),
+)
+
+/**
+ * Pull-members-up processor ([PullUpProcessor]) with all UI hooks disabled, mirroring the
+ * `McpMoveMembersProcessor`/`McpMoveInstanceMethodProcessor` pattern: the usage preview is never
+ * shown and conflicts abort with [PullUpConflictsFoundException] instead of showing the conflicts
+ * dialog. (The base `showConflicts` would silently proceed without a callback, so the override is
+ * what makes headless conflict handling safe.)
+ */
+private class McpPullUpProcessor(
+  sourceClass: PsiClass,
+  targetSuperClass: PsiClass,
+  membersToMove: Array<MemberInfo>,
+  javaDocPolicy: DocCommentPolicy,
+) : PullUpProcessor(sourceClass, targetSuperClass, membersToMove, javaDocPolicy) {
+  override fun isPreviewUsages(usages: Array<out UsageInfo?>): Boolean = false
+
+  override fun showConflicts(conflicts: MultiMap<PsiElement, String>, usages: Array<out UsageInfo?>?): Boolean {
+    if (conflicts.isEmpty) return true
+    throw PullUpConflictsFoundException(conflicts.values().toList())
+  }
+
+  fun findUsagesPublicly(): Array<out UsageInfo> = findUsages()
+}
+
+private class PullUpConflictsFoundException(val conflicts: List<String>) : Exception() {
+  override val message: String = "Pull members up refactoring found conflicts: ${conflicts.joinToString()}"
+}
+
+private data class PreparedPullUp(
+  val processor: McpPullUpProcessor,
+  val usages: Array<out UsageInfo>,
+)
