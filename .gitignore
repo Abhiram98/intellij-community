@@ -23,3 +23,7 @@
 /test-config
 /test-system
 /univocity-parsers
+.project
+.settings
+bin
+.classpath

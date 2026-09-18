@@ -35,7 +35,9 @@ class ReflectionToolsProvider : McpToolsProvider {
       McpToolset.enabledToolsets.map { toolset ->
         async(Dispatchers.Default) {
           try {
-            toolset.asToolsAsync()
+            val tools = toolset.asToolsAsync()
+            logger.error("MCPDIAG toolset converted: ${toolset::class.qualifiedName} -> [${tools.map { it.descriptor.name }.joinToString(", ")}]")
+            tools
           }
           catch (e: CancellationException) {
             throw e
