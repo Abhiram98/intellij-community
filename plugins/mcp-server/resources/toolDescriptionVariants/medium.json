@@ -1,0 +1,103 @@
+{
+  "tools": {
+    "search_text": {
+      "description": "Searches for a text substring within project files. Returns one entry per file with match coordinates (1-based line and column, end exclusive).",
+      "params": {
+        "q": "Text to search for",
+        "paths": "Glob patterns relative to the project root, with optional '!' excludes. A pattern without '/' matches the file name anywhere. A trailing '/' expands to '**'.",
+        "limit": "Maximum number of results to return"
+      }
+    },
+    "search_regex": {
+      "description": "Searches for regular expression matches within project files. Returns one entry per file with match coordinates (1-based line and column, end exclusive).",
+      "params": {
+        "q": "Regex pattern to search for",
+        "paths": "Glob patterns relative to the project root, with optional '!' excludes. A pattern without '/' matches the file name anywhere. A trailing '/' expands to '**'.",
+        "limit": "Maximum number of results to return"
+      }
+    },
+    "search_symbol": {
+      "description": "Searches for symbols: classes, methods, and fields. Use it for semantic lookup by identifier fragments. By default it searches project symbols only; repeat with include_external=true to search SDK and library symbols too.",
+      "params": {
+        "q": "Symbol query text",
+        "paths": "Glob patterns relative to the project root, with optional '!' excludes. A pattern without '/' matches the file name anywhere. A trailing '/' expands to '**'.",
+        "include_external": "Whether to include SDK and library symbols. Try it when the project search found nothing suitable.",
+        "limit": "Maximum number of results to return"
+      }
+    },
+    "rename_refactoring": {
+      "description": "Renames a symbol (variable, method, class, etc.) in the specified file and updates all references throughout the project. Use this instead of search-and-replace for safe, context-aware renaming.",
+      "params": {
+        "pathInProject": "Relative path to the file from the project root directory",
+        "symbolName": "Exact, case-sensitive name of the existing symbol to rename",
+        "newName": "New, case-sensitive name for the symbol"
+      }
+    },
+    "move_method": {
+      "description": "Moves a Java method from its containing class to a target class, updating all call sites. Static methods are moved as static members; instance methods are moved onto a target-typed parameter or field.",
+      "params": {
+        "pathInProject": "Relative path to the Java file from the project root",
+        "methodName": "Exact name of the method to move",
+        "targetClass": "Fully-qualified name of the destination class, e.g. \"org.acme.Bar\"",
+        "parameterTypes": "Optional parameter types to disambiguate overloaded methods, e.g. [\"String\", \"int\"]"
+      }
+    },
+    "extract_method": {
+      "description": "Extracts the code fragment at the given line/column range of a Java file into a new method, replacing the selection with a call site. The range uses 1-based inclusive line/column coordinates.",
+      "params": {
+        "pathInProject": "Relative path to the Java file from the project root",
+        "startLine": "1-based line number of the first selected line",
+        "startColumn": "1-based column number of the first selected character (default: 1)",
+        "endLine": "1-based line number of the last selected line",
+        "endColumn": "1-based column number of the last selected character, inclusive (default: end of line)",
+        "methodName": "Name for the extracted method; a safe name is suggested automatically if omitted"
+      }
+    },
+    "introduce_parameter": {
+      "description": "Replaces a local variable with a new method parameter, updating all call sites of the method in the project. The local declaration is removed and every occurrence becomes a reference to the new parameter.",
+      "params": {
+        "pathInProject": "Relative path to the Java file from the project root",
+        "variableName": "Exact name of the local variable to replace with the new parameter",
+        "methodName": "Optional name of the method declaring the variable, to disambiguate when several methods declare a variable with the same name",
+        "parameterTypes": "Optional method parameter types to disambiguate overloaded methods, e.g. [\"String\", \"int\"]"
+      }
+    },
+    "pull_up_method": {
+      "description": "Pulls a Java method up from its containing class into a superclass, updating all references with it. When makeAbstract is set the superclass keeps an abstract declaration and the implementation stays in the source class.",
+      "params": {
+        "pathInProject": "Relative path to the Java file from the project root",
+        "methodName": "Exact name of the method to pull up",
+        "parameterTypes": "Optional parameter types to disambiguate overloaded methods, e.g. [\"String\", \"int\"]",
+        "targetClass": "Fully-qualified name of the destination superclass; defaults to the direct superclass",
+        "makeAbstract": "When true, the superclass receives an abstract declaration and the implementation stays in the source class"
+      }
+    },
+    "push_down_method": {
+      "description": "Pushes a Java method down from a superclass into one or all of its direct subclasses, updating references. Without a targetClass the method is pushed into all direct subclasses and kept abstract in the source class.",
+      "params": {
+        "pathInProject": "Relative path to the Java file from the project root",
+        "methodName": "Exact name of the method to push down",
+        "parameterTypes": "Optional parameter types to disambiguate overloaded methods, e.g. [\"String\", \"int\"]",
+        "targetClass": "Fully-qualified name of a single destination subclass; when omitted, all direct subclasses receive the method"
+      }
+    },
+    "inline_method": {
+      "description": "Inlines a Java method into all of its call sites, replacing each call with the method body. Optionally removes the now-empty method declaration.",
+      "params": {
+        "pathInProject": "Relative path to the Java file from the project root",
+        "methodName": "Exact name of the method to inline",
+        "parameterTypes": "Optional parameter types to disambiguate overloaded methods, e.g. [\"String\", \"int\"]",
+        "inlineThisOnly": "Inline only the single existing call site instead of all usages (default: false)",
+        "deleteMethod": "Remove the method declaration after inlining all usages (default: true)"
+      }
+    },
+    "safe_delete": {
+      "description": "Safely deletes a class, method, field, parameter or local variable after verifying that every usage in the project can be resolved by the IntelliJ Safe Delete refactoring.",
+      "params": {
+        "pathInProject": "Relative path to the Java file from the project root",
+        "symbolName": "Exact name of the symbol to delete",
+        "kind": "Optional element kind to disambiguate: \"class\", \"method\", \"field\", \"parameter\" or \"local\" (default: auto)"
+      }
+    }
+  }
+}

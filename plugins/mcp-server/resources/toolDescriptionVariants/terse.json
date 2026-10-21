@@ -1,0 +1,87 @@
+{
+  "tools": {
+    "search_text": {
+      "description": "Searches project files for a text substring. Returns the files with matches.",
+      "params": {
+        "q": "Text to search for",
+        "paths": "Glob patterns relative to the project root that limit the search scope",
+        "limit": "Maximum number of results"
+      }
+    },
+    "search_regex": {
+      "description": "Searches project files for a regular expression match. Returns the files with matches.",
+      "params": {
+        "q": "Regex pattern to search for",
+        "paths": "Glob patterns relative to the project root that limit the search scope",
+        "limit": "Maximum number of results"
+      }
+    },
+    "search_symbol": {
+      "description": "Finds classes, methods, and fields by name fragments.",
+      "params": {
+        "q": "Symbol query text",
+        "paths": "Glob patterns relative to the project root that limit the search scope",
+        "limit": "Maximum number of results"
+      }
+    },
+    "rename_refactoring": {
+      "description": "Renames a symbol and updates all references across the project.",
+      "params": {
+        "pathInProject": "Relative path to the file from the project root",
+        "symbolName": "Name of the symbol to rename",
+        "newName": "New name for the symbol"
+      }
+    },
+    "move_method": {
+      "description": "Moves a Java method to another class, updating all call sites.",
+      "params": {
+        "pathInProject": "Relative path to the file from the project root",
+        "methodName": "Name of the method to move",
+        "targetClass": "Fully-qualified name of the destination class"
+      }
+    },
+    "extract_method": {
+      "description": "Extracts a code fragment into a new method in a Java file.",
+      "params": {
+        "pathInProject": "Relative path to the Java file from the project root",
+        "startLine": "1-based line number of the first selected line",
+        "endLine": "1-based line number of the last selected line"
+      }
+    },
+    "introduce_parameter": {
+      "description": "Replaces a local variable with a method parameter, updating all call sites.",
+      "params": {
+        "pathInProject": "Relative path to the Java file from the project root",
+        "variableName": "Name of the local variable to replace"
+      }
+    },
+    "pull_up_method": {
+      "description": "Moves a method from a class to its superclass.",
+      "params": {
+        "pathInProject": "Relative path to the Java file from the project root",
+        "methodName": "Name of the method to pull up"
+      }
+    },
+    "push_down_method": {
+      "description": "Pushes a method from a superclass to its subclasses.",
+      "params": {
+        "pathInProject": "Relative path to the Java file from the project root",
+        "methodName": "Name of the method to push down"
+      }
+    },
+    "inline_method": {
+      "description": "Inlines a method body into all call sites.",
+      "params": {
+        "pathInProject": "Relative path to the Java file from the project root",
+        "methodName": "Name of the method to inline"
+      }
+    },
+    "safe_delete": {
+      "description": "Deletes a symbol after verifying all usages can be resolved.",
+      "params": {
+        "pathInProject": "Relative path to the Java file from the project root",
+        "symbolName": "Name of the symbol to delete"
+      }
+    }
+  }
+}

@@ -14,6 +14,7 @@ import androidx.compose.runtime.setValue
 import com.intellij.icons.AllIcons
 import com.intellij.ide.impl.ProjectUtil
 import com.intellij.mcpserver.McpServerBundle
+import com.intellij.mcpserver.ToolDescriptionVariant
 import com.intellij.mcpserver.clients.McpClient
 import com.intellij.mcpserver.createSseServerJsonEntry
 import com.intellij.mcpserver.createStdioMcpServerJsonConfiguration
@@ -23,6 +24,7 @@ import com.intellij.mcpserver.icons.McpserverIcons
 import com.intellij.mcpserver.impl.McpClientDetector
 import com.intellij.mcpserver.impl.McpServerService
 import com.intellij.mcpserver.impl.McpServerTerminalPromotionDismissalState
+import com.intellij.mcpserver.impl.ToolDescriptionVariantService
 import com.intellij.mcpserver.settings.McpServerSettings
 import com.intellij.mcpserver.util.getHelpLink
 import com.intellij.mcpserver.util.getPathForMcp
@@ -41,6 +43,7 @@ import com.intellij.openapi.util.NlsContexts
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.platform.compose.swing.ComposeSwingSearchableConfigurable
 import com.intellij.platform.compose.swing.components.BrowserLink
+import com.intellij.platform.compose.swing.components.ComboBox
 import com.intellij.platform.compose.swing.components.Comment
 import com.intellij.platform.compose.swing.components.FormGap
 import com.intellij.platform.compose.swing.components.FormPanel
@@ -92,6 +95,10 @@ class McpServerSettingsConfigurable : ComposeSwingSearchableConfigurable() {
   private var braveMode by bind(settings::enableBraveMode)
   private var showTerminalPromotion by bind(TerminalPromotionSetting::isShown, TerminalPromotionSetting::setShown)
   private var terminalAnsiHighlighting by bind(settings::enableTerminalAnsiHighlighting)
+  private var descriptionVariant by bind(
+    get = { ToolDescriptionVariantService.getInstance().variant.value },
+    set = { ToolDescriptionVariantService.writeVariantToFile(it) },
+  )
 
   private var serverRunning by mutableStateOf(false)
   private var sseUrl by mutableStateOf("")
@@ -136,6 +143,7 @@ class McpServerSettingsConfigurable : ComposeSwingSearchableConfigurable() {
         ClientsGroup()
         ManualConfigGroup()
         CommandExecutionGroup()
+        ToolDescriptionsGroup()
       }
 
       TerminalGroup()
@@ -251,9 +259,24 @@ class McpServerSettingsConfigurable : ComposeSwingSearchableConfigurable() {
     }
   }
 
+  /** The verbosity preset for the agent-facing tool descriptions; it writes the variant control file. */
   @Composable
-  private fun FormScope.TerminalGroup() {
-    FormGroup(McpServerBundle.message("settings.terminal.group"), indent = false) {
+  private fun FormScope.ToolDescriptionsGroup() {
+    FormGroup(McpServerBundle.message("settings.tool.descriptions.group"), indent = false) {
+      FormRow(comment = McpServerBundle.message("settings.tool.descriptions.comment")) {
+        Label(McpServerBundle.message("settings.tool.descriptions.verbosity"), modifier = SwingModifier.cell(smallGapAfter = true))
+        ComboBox(
+          items = ToolDescriptionVariant.entries,
+          selectedItem = descriptionVariant,
+          onSelectedItemChange = { variant -> descriptionVariant = variant ?: ToolDescriptionVariant.BASELINE },
+          itemContent = { variant -> Label(McpServerBundle.message(variant.displayNameKey)) },
+        )
+      }
+    }
+  }
+
+  @Composable
+  private fun FormScope.TerminalGroup() {    FormGroup(McpServerBundle.message("settings.terminal.group"), indent = false) {
       FormRow(comment = McpServerBundle.message("settings.terminal.promotion.comment", McpServerBundle.ideDisplayName())) {
         CheckBox(
           text = McpServerBundle.message("settings.terminal.promotion.show"),

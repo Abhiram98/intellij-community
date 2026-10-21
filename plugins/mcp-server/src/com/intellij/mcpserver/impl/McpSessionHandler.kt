@@ -11,6 +11,7 @@ import com.intellij.mcpserver.McpTool
 import com.intellij.mcpserver.McpToolCallResult
 import com.intellij.mcpserver.McpToolCallResultContent
 import com.intellij.mcpserver.McpToolInvocationMode
+import com.intellij.mcpserver.ToolDescriptionVariant
 import com.intellij.mcpserver.launchOriginOf
 import com.intellij.mcpserver.ToolCallListener
 import com.intellij.mcpserver.elicitation.McpElicitationKind
@@ -74,6 +75,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.jvm.Volatile
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeSource
 
@@ -173,6 +175,13 @@ internal class McpSessionHandler(
    */
   private var lastAppliedToolsState: AppliedToolsState? = null
 
+  /**
+   * The variant applied to the registered tools. Read by the variant flow collector without
+   * [updateMutex], hence volatile; a stale read costs one extra no-op update at worst.
+   */
+  @Volatile
+  private var lastAppliedVariant: ToolDescriptionVariant? = null
+
   fun updateClientInfo(newClientInfo: Implementation) {
     toolsProvider.updateClientInfo(newClientInfo)
   }
@@ -182,6 +191,18 @@ internal class McpSessionHandler(
   }
 
   private suspend fun updateTools(newTools: List<McpTool>): Unit = updateMutex.withLock {
+    // The diff below is name-keyed, so a description-only change never re-registers anything.
+    // Force a full remove/re-add when the variant moved.
+    val variant = ToolDescriptionVariantService.getInstance().variant.value
+    val variantOverrides = ToolDescriptionVariantDefinitionsLoader.load(variant)
+    if (variant != lastAppliedVariant && registeredToolsStrippedMode.isNotEmpty()) {
+      logger.info("Tool description variant changed from '$lastAppliedVariant' to '$variant'; re-registering all tools")
+      mcpServer.removeTools(registeredToolsStrippedMode.keys.toList())
+      registeredToolsStrippedMode.clear()
+      lastAppliedToolsState = null
+    }
+    lastAppliedVariant = variant
+
     val resolvedProject = try {
       resolveSessionProject()
     }
@@ -210,7 +231,7 @@ internal class McpSessionHandler(
     val toolsToAdd = newTools.filter { it.descriptor.name !in registeredToolsStrippedMode }
     if (toolsToAdd.isNotEmpty()) {
       logger.trace { "Adding tools to MCP server: ${toolsToAdd.map { it.descriptor.name }}" }
-      mcpServer.addTools(toolsToAdd.map { mcpToolToRegisteredTool(it, projectKnownUpfront) })
+      mcpServer.addTools(toolsToAdd.map { mcpToolToRegisteredTool(it, projectKnownUpfront, variantOverrides) })
       toolsToAdd.forEach { registeredToolsStrippedMode[it.descriptor.name] = projectKnownUpfront }
     }
 
@@ -235,6 +256,13 @@ internal class McpSessionHandler(
       logger.trace { "Subscribing to MCP tools updates for session ${sessionId}" }
       mcpTools.collectLatest { updatedTools ->
         updateTools(updatedTools)
+      }
+    }
+
+    sessionScope.launch {
+      logger.trace { "Subscribing to tool description variant updates for session ${sessionId}" }
+      ToolDescriptionVariantService.getInstance().variant.collect {
+        updateTools()
       }
     }
 
@@ -332,8 +360,15 @@ internal class McpSessionHandler(
     else -> McpToolCallInvocationMode.DIRECT
   }
 
-  private fun mcpToolToRegisteredTool(mcpTool: McpTool, projectKnownUpfront: Boolean): RegisteredTool {
-    val tool = mcpTool.toSdkTool(stripPropertyName = if (projectKnownUpfront) projectPathParameterName else null)
+  private fun mcpToolToRegisteredTool(
+    mcpTool: McpTool,
+    projectKnownUpfront: Boolean,
+    variantOverrides: ToolDescriptionVariantDefinitions?,
+  ): RegisteredTool {
+    val tool = mcpTool.toSdkTool(
+      stripPropertyName = if (projectKnownUpfront) projectPathParameterName else null,
+      variantOverrides = variantOverrides?.tools?.get(mcpTool.descriptor.name),
+    )
     return RegisteredTool(tool) { request ->
       val session = sessionAwaiter.await()
       val httpRequest = currentCoroutineContext().httpRequestOrNull
@@ -571,7 +606,10 @@ private fun McpToolCallResult.toSdkToolCallResult(): CallToolResult {
   return callToolResult
 }
 
-private fun McpTool.toSdkTool(stripPropertyName: String? = null): Tool {
+private fun McpTool.toSdkTool(
+  stripPropertyName: String? = null,
+  variantOverrides: ToolDescriptionOverride? = null,
+): Tool {
   val outputSchema = if (structuredToolOutputEnabled) {
     descriptor.outputSchema?.let {
       ToolSchema(
@@ -584,21 +622,25 @@ private fun McpTool.toSdkTool(stripPropertyName: String? = null): Tool {
   val inputProperties = descriptor.inputSchema.propertiesSchema
   val inputRequired = descriptor.inputSchema.requiredProperties
 
-  val effectiveProperties: JsonObject
-  val effectiveRequired: List<String>
+  val strippedProperties: JsonObject
+  val strippedRequired: List<String>
   if (stripPropertyName != null && inputProperties.containsKey(stripPropertyName)) {
-    effectiveProperties = JsonObject(inputProperties.filterKeys { it != stripPropertyName })
-    effectiveRequired = inputRequired.filter { it != stripPropertyName }
+    strippedProperties = JsonObject(inputProperties.filterKeys { it != stripPropertyName })
+    strippedRequired = inputRequired.filter { it != stripPropertyName }
   }
   else {
-    effectiveProperties = inputProperties
-    effectiveRequired = inputRequired.toList()
+    strippedProperties = inputProperties
+    strippedRequired = inputRequired.toList()
   }
+  val effectiveProperties = variantOverrides?.params?.takeIf { it.isNotEmpty() }
+    ?.let { applyParameterDescriptionOverrides(strippedProperties, it) }
+    ?: strippedProperties
+  val effectiveRequired = strippedRequired
 
   val tool = Tool(
     name = descriptor.name,
     title = descriptor.title,
-    description = descriptor.description,
+    description = variantOverrides?.description ?: descriptor.description,
     inputSchema = ToolSchema(
       properties = effectiveProperties,
       required = effectiveRequired,
@@ -608,3 +650,12 @@ private fun McpTool.toSdkTool(stripPropertyName: String? = null): Tool {
   )
   return tool
 }
+
+/**
+ * Replaces the `description` member of the matching parameter schemas; the other members pass through.
+ */
+private fun applyParameterDescriptionOverrides(properties: JsonObject, overrides: Map<String, String>): JsonObject =
+  JsonObject(properties.mapValues { (name, schema) ->
+    val description = overrides[name] ?: return@mapValues schema
+    if (schema is JsonObject) JsonObject(schema + ("description" to JsonPrimitive(description))) else schema
+  })
