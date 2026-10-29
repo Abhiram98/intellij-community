@@ -16,6 +16,7 @@ import com.intellij.mcpserver.util.resolveInProject
 import com.intellij.openapi.application.EDT
 import com.intellij.openapi.application.readAction
 import com.intellij.openapi.application.writeIntentReadAction
+import com.intellij.openapi.command.writeCommandAction
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
@@ -41,17 +42,21 @@ import com.intellij.psi.PsiLocalVariable
 import com.intellij.psi.PsiMember
 import com.intellij.psi.PsiMethod
 import com.intellij.psi.PsiModifier
+import com.intellij.psi.PsiModifierList
 import com.intellij.psi.PsiNamedElement
 import com.intellij.psi.PsiPackage
 import com.intellij.psi.PsiParameter
+import com.intellij.psi.PsiQualifiedReference
 import com.intellij.psi.PsiRecursiveElementVisitor
 import com.intellij.psi.PsiReference
 import com.intellij.psi.PsiReferenceExpression
+import com.intellij.psi.PsiResolveHelper
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.searches.ClassInheritorsSearch
 import com.intellij.psi.search.searches.MethodReferencesSearch
 import com.intellij.psi.search.searches.ReferencesSearch
 import com.intellij.psi.util.PsiTreeUtil
+import com.intellij.psi.util.PsiUtil
 import com.intellij.psi.util.PsiUtilCore
 import com.intellij.refactoring.BaseRefactoringProcessor
 import com.intellij.refactoring.IntroduceParameterRefactoring
@@ -62,6 +67,7 @@ import com.intellij.refactoring.introduceVariable.IntroduceVariableBase
 import com.intellij.refactoring.memberPullUp.PullUpConflictsUtil
 import com.intellij.refactoring.memberPullUp.PullUpProcessor
 import com.intellij.refactoring.memberPushDown.PushDownProcessor
+import com.intellij.refactoring.util.ConflictsUtil
 import com.intellij.refactoring.rename.RenameProcessor
 import com.intellij.refactoring.rename.RenamePsiElementProcessor
 import com.intellij.refactoring.rename.RenameUtil
@@ -74,12 +80,14 @@ import com.intellij.refactoring.safeDelete.usageInfo.SafeDeleteOverridingMethodU
 import com.intellij.refactoring.safeDelete.usageInfo.SafeDeleteParameterCallHierarchyUsageInfo
 import com.intellij.refactoring.safeDelete.usageInfo.SafeDeleteReferenceUsageInfo
 import com.intellij.refactoring.util.DocCommentPolicy
+import com.intellij.refactoring.util.RefactoringConflictsUtil
 import com.intellij.refactoring.util.RefactoringHierarchyUtil
 import com.intellij.refactoring.util.RefactoringUIUtil
 import com.intellij.refactoring.util.classMembers.MemberInfo
 import com.intellij.refactoring.util.classMembers.UsesAndInterfacesDependencyMemberInfoModel
 import com.intellij.usageView.UsageInfo
 import com.intellij.usageView.UsageViewUtil
+import com.intellij.util.VisibilityUtil
 import com.intellij.util.containers.MultiMap
 import it.unimi.dsi.fastutil.ints.IntArrayList
 import it.unimi.dsi.fastutil.ints.IntList
@@ -1033,6 +1041,166 @@ class RefactoringToolset : McpToolset {
     }
   }
 
+  @McpTool
+  @McpDescription("""
+    Changes the access modifier (visibility) of a Java field or method in place, without moving it
+    (IntelliJ "Change Visibility" refactoring). The declaration keeps its location; only the
+    `public`/`protected`/`private`/package-private modifier changes.
+
+    Before changing anything, the tool searches every reference to the member project-wide and checks
+    whether the member is still accessible from each reference under the NEW visibility, and whether
+    the change stays compatible with the override hierarchy (a method cannot be given weaker access
+    than a method it overrides, and must not hide access its overriders rely on). When the change
+    would break accessibility or the hierarchy, nothing is changed and `success` is `false` with the
+    problems listed in `conflicts` and summarised in `message`. This is the "would this break
+    compilation" report.
+
+    Requires:
+        - pathInProject: The relative path to the Java file declaring the member
+        - symbolName: The exact, case-sensitive name of the field or method
+        - visibility: The target visibility: "public", "protected", "private" or "package"
+          (package-private, i.e. no explicit modifier)
+
+    Optional:
+        - kind: Restricts the search to "field" or "method" when a field and a method share the name.
+          Default: auto - the first matching member in document order.
+        - parameterTypes: Parameter types (e.g. ["String", "int"]) to disambiguate overloaded methods.
+
+    Returns a structured result with `success`, the member name and kind, the old and new visibility,
+    the number of references analysed, the list of changed files, and any `conflicts`. When the member
+    already has the requested visibility the tool reports `success` with no change.
+  """)
+  suspend fun change_visibility(
+    @McpDescription(Constants.RELATIVE_PATH_IN_PROJECT_DESCRIPTION)
+    pathInProject: String,
+    @McpDescription("Exact name of the field or method whose visibility changes")
+    symbolName: String,
+    @McpDescription("Target visibility: \"public\", \"protected\", \"private\" or \"package\" (package-private)")
+    visibility: String,
+    @McpDescription("Optional member kind to disambiguate a field and a method of the same name: \"field\" or \"method\" (default: auto)")
+    kind: String? = null,
+    @McpDescription("Optional parameter types to disambiguate overloaded methods, e.g. [\"String\", \"int\"]")
+    parameterTypes: List<String>? = null,
+  ): ChangeVisibilityResult {
+    currentCoroutineContext().reportToolActivity(McpServerBundle.message("tool.activity.changing.visibility", symbolName, pathInProject))
+    val project = currentCoroutineContext().project
+    // Reference search (ReferencesSearch) and hierarchy search are index-backed.
+    DumbService.getInstance(project).waitForSmartMode()
+
+    val psiFile = resolveProjectPsiFile(project, pathInProject)
+    if (psiFile !is PsiJavaFile) {
+      mcpFail("Only Java members can have their visibility changed, but '$pathInProject' is not a Java file")
+    }
+
+    val requestKind = parseVisibilityMemberKind(kind)
+    val newVisibility = parseVisibilityModifier(visibility)
+
+    val member = readAction {
+      mcpFindVisibilityMember(psiFile, symbolName, requestKind, parameterTypes)
+    }.let { candidates ->
+      if (candidates.isEmpty()) {
+        mcpFail(if (kind == null) "Couldn't find a field or method named '$symbolName' in file '$pathInProject'"
+                else "Couldn't find $kind '$symbolName' in file '$pathInProject'")
+      }
+      if (candidates.size > 1) {
+        val signatures = candidates.map { describeVisibilityMember(it) }
+        mcpFail("Several members named '$symbolName' found in '$pathInProject': $signatures. " +
+                "Pass `kind` and/or `parameterTypes` to disambiguate.")
+      }
+      candidates.single()
+    }
+
+    val memberKind = if (member is PsiField) "field" else "method"
+    val oldVisibility = readAction { VisibilityUtil.getVisibilityModifier(member.modifierList) }
+    val elementDescription = readAction { RefactoringUIUtil.getDescription(member, true) }
+
+    if (oldVisibility == newVisibility) {
+      return ChangeVisibilityResult(
+        success = true,
+        message = "'$symbolName' in $pathInProject already has ${visibilityDisplayName(newVisibility)} visibility; nothing changed.",
+        symbolName = symbolName,
+        symbolKind = memberKind,
+        oldVisibility = visibilityDisplayName(oldVisibility),
+        newVisibility = visibilityDisplayName(newVisibility),
+      )
+    }
+
+    // Pre-flight conflict analysis. Mirrors JavaChangeSignatureUsageProcessor.addInaccessibility
+    // (the real "Change Visibility" check): copy the modifier list, apply the new visibility, then
+    // test every project-wide reference with PsiResolveHelper.isAccessible against that copy. For a
+    // method, also check the override hierarchy stays compatible. Collect problems into a MultiMap
+    // and abort without touching code when any is present, exactly like pull_up_method's gate.
+    val analysis = readAction {
+      val conflicts = MultiMap<PsiElement, String>()
+      val modifierListCopy = member.modifierList?.copy() as? PsiModifierList
+      if (modifierListCopy != null) {
+        VisibilityUtil.setVisibility(modifierListCopy, newVisibility)
+      }
+      val resolveHelper = JavaPsiFacade.getInstance(project).resolveHelper
+      val references = ReferencesSearch.search(member).findAll()
+      for (reference in references) {
+        val element = reference.element
+        if (reference !is PsiQualifiedReference) continue
+        // The access object class, taken from the reference qualifier, controls protected access.
+        val qualifier = (reference as? PsiReferenceExpression)?.qualifierExpression
+        val accessObjectClass = if (qualifier != null) PsiUtil.getAccessObjectClass(qualifier).element as? PsiClass else null
+        if (modifierListCopy != null &&
+            !resolveHelper.isAccessible(member, modifierListCopy, element, accessObjectClass, null)) {
+          conflicts.putValue(
+            element,
+            "${visibilityDisplayName(newVisibility).replaceFirstChar { it.uppercase() }} " +
+            "${RefactoringUIUtil.getDescription(member, true)} will not be accessible from " +
+            RefactoringUIUtil.getDescription(ConflictsUtil.getContainer(element), true),
+          )
+        }
+      }
+      if (member is PsiMethod) {
+        RefactoringConflictsUtil.getInstance()
+          .analyzeHierarchyConflictsAfterMethodModifierChange(member, newVisibility, conflicts)
+      }
+      VisibilityAnalysis(conflicts.values().distinct(), references.size)
+    }
+
+    if (analysis.conflicts.isNotEmpty()) {
+      return ChangeVisibilityResult(
+        success = false,
+        message = "Changing '$symbolName' in $pathInProject to ${visibilityDisplayName(newVisibility)} " +
+                  "would break the code: ${analysis.conflicts.size} problem(s) found.",
+        symbolName = symbolName,
+        symbolKind = memberKind,
+        oldVisibility = visibilityDisplayName(oldVisibility),
+        newVisibility = visibilityDisplayName(newVisibility),
+        referencesAnalysed = analysis.referencesAnalysed,
+        conflicts = analysis.conflicts,
+      )
+    }
+
+    writeCommandAction(project, McpServerBundle.message("command.name.change.visibility")) {
+      VisibilityUtil.setVisibility(member.modifierList!!, newVisibility)
+    }
+
+    val changedFiles = readAction {
+      val files = LinkedHashSet<VirtualFile>()
+      PsiUtilCore.getVirtualFile(member)?.let { files.add(it) }
+      for (reference in ReferencesSearch.search(member).findAll()) {
+        PsiUtilCore.getVirtualFile(reference.element)?.let { files.add(it) }
+      }
+      files.map { project.projectDirectory.relativizeIfPossible(it) }.sorted()
+    }
+
+    return ChangeVisibilityResult(
+      success = true,
+      message = "Changed ${visibilityDisplayName(oldVisibility)} $elementDescription in $pathInProject to " +
+                "${visibilityDisplayName(newVisibility)}; ${analysis.referencesAnalysed} reference(s) analysed.",
+      symbolName = symbolName,
+      symbolKind = memberKind,
+      oldVisibility = visibilityDisplayName(oldVisibility),
+      newVisibility = visibilityDisplayName(newVisibility),
+      referencesAnalysed = analysis.referencesAnalysed,
+      changedFiles = changedFiles,
+    )
+  }
+
 }
 
 
@@ -1232,6 +1400,85 @@ data class SafeDeleteResult(
   val deletedElement: String? = null,
   val changedFiles: List<String> = emptyList(),
 )
+
+@OptIn(ExperimentalSerializationApi::class)
+@Serializable
+data class ChangeVisibilityResult(
+  val success: Boolean,
+  val message: String,
+  val symbolName: String,
+  val symbolKind: String,
+  val oldVisibility: String,
+  val newVisibility: String,
+  @EncodeDefault val referencesAnalysed: Int = 0,
+  val changedFiles: List<String> = emptyList(),
+  val conflicts: List<String> = emptyList(),
+)
+
+private data class VisibilityAnalysis(
+  val conflicts: List<String>,
+  val referencesAnalysed: Int,
+)
+
+private enum class VisibilityMemberKind(val text: String) {
+  FIELD("field"), METHOD("method"),
+}
+
+private fun parseVisibilityMemberKind(kind: String?): VisibilityMemberKind? {
+  if (kind == null) return null
+  return VisibilityMemberKind.entries.firstOrNull { it.text == kind }
+         ?: mcpFail("Invalid kind: '$kind'. Expected one of: field, method")
+}
+
+/**
+ * Maps the tool's visibility vocabulary to a [PsiModifier] constant accepted by
+ * [VisibilityUtil.setVisibility]. Package-private is [PsiModifier.PACKAGE_LOCAL] (not null), because
+ * `setVisibility` requires a non-null modifier string.
+ */
+private fun parseVisibilityModifier(visibility: String): String = when (visibility) {
+  "public" -> PsiModifier.PUBLIC
+  "protected" -> PsiModifier.PROTECTED
+  "private" -> PsiModifier.PRIVATE
+  "package" -> PsiModifier.PACKAGE_LOCAL
+  else -> mcpFail("Invalid visibility: '$visibility'. Expected one of: public, protected, private, package")
+}
+
+private fun visibilityDisplayName(modifier: String): String =
+  if (modifier == PsiModifier.PACKAGE_LOCAL) "package-private" else modifier
+
+/**
+ * Finds the fields and methods named [symbolName], restricted to [kind] when given and to the
+ * overload matching [parameterTypes] for methods. Returns every candidate so the caller can report
+ * an ambiguous name, mirroring `mcpFindSafeDeleteCandidates`.
+ */
+private fun mcpFindVisibilityMember(
+  psiFile: PsiJavaFile,
+  symbolName: String,
+  kind: VisibilityMemberKind?,
+  parameterTypes: List<String>?,
+): List<PsiMember> {
+  val matches = mutableListOf<PsiMember>()
+  val visitor = object : PsiRecursiveElementVisitor() {
+    override fun visitElement(element: PsiElement) {
+      if (element is PsiField && (kind == null || kind == VisibilityMemberKind.FIELD) && element.name == symbolName) {
+        matches.add(element)
+      }
+      else if (element is PsiMethod && (kind == null || kind == VisibilityMemberKind.METHOD)
+               && element.name == symbolName && !element.isConstructor
+               && (parameterTypes == null || matchesParameterTypes(element, parameterTypes))) {
+        matches.add(element)
+      }
+      super.visitElement(element)
+    }
+  }
+  psiFile.accept(visitor)
+  return matches
+}
+
+private fun describeVisibilityMember(member: PsiMember): String = when (member) {
+  is PsiMethod -> member.name + member.parameterList.parameters.joinToString(", ", "(", ")") { it.type.presentableText }
+  else -> (member as? PsiNamedElement)?.name ?: "<member>"
+}
 
 /**
  * Introduce Parameter ([IntroduceParameterProcessor]) with all UI hooks disabled. Conflicts abort the
