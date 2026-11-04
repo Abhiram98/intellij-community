@@ -60,6 +60,8 @@ import com.intellij.psi.util.PsiUtil
 import com.intellij.psi.util.PsiUtilCore
 import com.intellij.refactoring.BaseRefactoringProcessor
 import com.intellij.refactoring.IntroduceParameterRefactoring
+import com.intellij.refactoring.convertToInstanceMethod.ConvertToInstanceMethodProcessor
+import com.intellij.refactoring.extractInterface.ExtractInterfaceHandler
 import com.intellij.refactoring.inline.InlineMethodHandler
 import com.intellij.refactoring.inline.InlineMethodProcessor
 import com.intellij.refactoring.introduceParameter.IntroduceParameterProcessor
@@ -67,6 +69,7 @@ import com.intellij.refactoring.introduceVariable.IntroduceVariableBase
 import com.intellij.refactoring.memberPullUp.PullUpConflictsUtil
 import com.intellij.refactoring.memberPullUp.PullUpProcessor
 import com.intellij.refactoring.memberPushDown.PushDownProcessor
+import com.intellij.refactoring.turnRefsToSuper.TurnRefsToSuperProcessor
 import com.intellij.refactoring.util.ConflictsUtil
 import com.intellij.refactoring.rename.RenameProcessor
 import com.intellij.refactoring.rename.RenamePsiElementProcessor
@@ -1982,4 +1985,477 @@ private data class PreparedSafeDelete(
   val blocked: String?,
   val candidateFiles: List<VirtualFile>,
   val elementDescription: String,
+)
+
+
+@McpTool
+@McpDescription("""
+  Extracts an interface from a Java class and optionally replaces references to the class with
+  references to the new interface (IntelliJ "Extract Interface" refactoring).
+
+  Creates a new interface with the selected public methods and adds it to the source class's
+  implements list. When `replaceReferences` is true, also replaces all project-wide references
+  to the source class with references to the new interface where possible.
+
+  Requires:
+      - pathInProject: The relative path to the Java file declaring the source class
+      - className: The name of the source class to extract an interface from
+      - interfaceName: The name for the new interface
+
+  Optional:
+      - methodNames: List of method names to include in the interface (default: all public methods)
+      - targetPackage: Package for the new interface (default: same package as the source class)
+      - replaceReferences: Replace class references with interface references (default: false)
+
+  Returns a structured result with `success`, the interface name, the extracted methods, whether
+  references were replaced, the count of replaced references, and the list of changed files.
+  Tool-level errors (class not found, method not found, interface name conflict) abort with an error.
+""")
+suspend fun extract_interface(
+  @McpDescription(Constants.RELATIVE_PATH_IN_PROJECT_DESCRIPTION)
+  pathInProject: String,
+  @McpDescription("Name of the source class to extract an interface from")
+  className: String,
+  @McpDescription("Name for the new interface")
+  interfaceName: String,
+  @McpDescription("Optional list of method names to include in the interface (default: all public methods)")
+  methodNames: List<String>? = null,
+  @McpDescription("Optional package for the new interface (default: same package as the source class)")
+  targetPackage: String? = null,
+  @McpDescription("Replace class references with interface references after extraction (default: false)")
+  replaceReferences: Boolean = false,
+): ExtractInterfaceResult {
+  currentCoroutineContext().reportToolActivity(McpServerBundle.message("tool.activity.extracting.interface", className, interfaceName, pathInProject))
+  val project = currentCoroutineContext().project
+  DumbService.getInstance(project).waitForSmartMode()
+
+  val psiFile = resolveProjectPsiFile(project, pathInProject)
+  if (psiFile !is PsiJavaFile) {
+    mcpFail("Only Java classes can have interfaces extracted, but '$pathInProject' is not a Java file")
+  }
+
+  val sourceClass = readAction {
+    findClassInFile(psiFile, className)
+  } ?: mcpFail("Couldn't find class '$className' in file '$pathInProject'")
+
+  // Determine target directory for the new interface
+  val targetDir = readAction {
+    if (targetPackage != null) {
+      val facade = JavaPsiFacade.getInstance(project)
+      val targetPkg = facade.findPackage(targetPackage)
+        ?: mcpFail("Package '$targetPackage' not found in project")
+      targetPkg.directories.firstOrNull()
+        ?: mcpFail("No directory found for package '$targetPackage'")
+    }
+    else {
+      // Use the same directory as the source class
+      psiFile.containingDirectory
+        ?: mcpFail("Cannot determine directory for '$pathInProject'")
+    }
+  }
+
+  // Collect methods to extract
+  val memberInfos = readAction {
+    val methods = sourceClass.methods
+      .filter { method ->
+        !method.isConstructor &&
+        method.hasModifierProperty(PsiModifier.PUBLIC) &&
+        (methodNames == null || method.name in methodNames)
+      }
+    
+    if (methods.isEmpty()) {
+      mcpFail(if (methodNames != null) "No public methods matching $methodNames found in class '$className'"
+              else "No public methods found in class '$className'")
+    }
+    
+    methods.map { method ->
+      MemberInfo(method).apply { isChecked = true }
+    }.toTypedArray()
+  }
+
+  val extractedMethodNames = memberInfos.mapNotNull { it.member?.name }
+
+  // Perform the extraction
+  val interfaceClass = withContext(Dispatchers.EDT) {
+    writeIntentReadAction {
+      ExtractInterfaceHandler.extractInterface(
+        targetDir,
+        sourceClass,
+        interfaceName,
+        memberInfos,
+        DocCommentPolicy(DocCommentPolicy.ASIS)
+      )
+    }
+  }
+
+  val sourceFileName = project.projectDirectory.relativizeIfPossible(psiFile.virtualFile)
+  val interfaceFileName = readAction {
+    project.projectDirectory.relativizeIfPossible(interfaceClass.containingFile.virtualFile)
+  }
+
+  // Optionally replace references
+  var referencesReplaced = 0
+  if (replaceReferences) {
+    val processor = readAction {
+      McpTurnRefsToSuperProcessor(project, sourceClass, interfaceClass, false)
+    }
+    val usages = readAction { processor.findUsagesPublicly() }
+    referencesReplaced = usages.size
+    
+    try {
+      withContext(Dispatchers.EDT) {
+        writeIntentReadAction {
+          processor.run()
+        }
+      }
+    }
+    catch (e: Exception) {
+      // Reference replacement failed, but interface was created successfully
+      referencesReplaced = 0
+    }
+  }
+
+  val changedFiles = readAction {
+    val files = mutableSetOf<String>()
+    files.add(sourceFileName)
+    files.add(interfaceFileName)
+    // Add files where references were replaced
+    if (referencesReplaced > 0) {
+      ReferencesSearch.search(sourceClass).findAll().mapNotNull { ref ->
+        PsiUtilCore.getVirtualFile(ref.element)
+      }.forEach { files.add(project.projectDirectory.relativizeIfPossible(it)) }
+    }
+    files.sorted()
+  }
+
+  return ExtractInterfaceResult(
+    success = true,
+    message = "Extracted interface '$interfaceName' from '$className' with ${memberInfos.size} method(s)" +
+              (if (replaceReferences) "; replaced $referencesReplaced reference(s)" else "") + ".",
+    interfaceName = interfaceName,
+    sourceClass = className,
+    extractedMethods = extractedMethodNames,
+    referencesReplaced = referencesReplaced,
+    changedFiles = changedFiles,
+  )
+}
+
+/**
+ * Use Interface Where Possible refactoring tool implementation.
+ * Replaces class references with interface references where possible.
+ */
+@McpTool
+@McpDescription("""
+  Replaces project-wide references to a Java class with references to one of its interfaces or
+  superclasses (IntelliJ "Use Interface Where Possible" refactoring).
+
+  Searches for all references to the source class in the project and replaces them with references
+  to the target interface/superclass where it is safe to do so. A reference can be replaced when
+  the target type is accessible and the reference does not use members specific to the source class.
+
+  Requires:
+      - pathInProject: The relative path to the Java file declaring the source class
+      - sourceClassName: The name of the source class whose references will be replaced
+      - targetClassName: The fully-qualified name of the target interface/superclass to use instead
+
+  Optional:
+      - replaceInstanceOf: Also replace instanceof checks with the target type (default: false)
+
+  Returns a structured result with `success`, the source and target class names, the number of
+  references found and replaced, and the list of changed files. When no references can be replaced,
+  `success` is `true` with 0 references replaced.
+""")
+suspend fun use_interface_where_possible(
+  @McpDescription(Constants.RELATIVE_PATH_IN_PROJECT_DESCRIPTION)
+  pathInProject: String,
+  @McpDescription("Name of the source class whose references will be replaced")
+  sourceClassName: String,
+  @McpDescription("Fully-qualified name of the target interface/superclass to use instead")
+  targetClassName: String,
+  @McpDescription("Also replace instanceof checks with the target type (default: false)")
+  replaceInstanceOf: Boolean = false,
+): UseInterfaceResult {
+  currentCoroutineContext().reportToolActivity(McpServerBundle.message("tool.activity.using.interface.where.possible", sourceClassName, targetClassName, pathInProject))
+  val project = currentCoroutineContext().project
+  DumbService.getInstance(project).waitForSmartMode()
+
+  val psiFile = resolveProjectPsiFile(project, pathInProject)
+  if (psiFile !is PsiJavaFile) {
+    mcpFail("Only Java classes can have references replaced, but '$pathInProject' is not a Java file")
+  }
+
+  val sourceClass = readAction {
+    findClassInFile(psiFile, sourceClassName)
+  } ?: mcpFail("Couldn't find class '$sourceClassName' in file '$pathInProject'")
+
+  val targetClass = readAction {
+    JavaPsiFacade.getInstance(project).findClass(targetClassName, GlobalSearchScope.projectScope(project))
+  } ?: mcpFail("Target class '$targetClassName' not found in project")
+
+  // Validate inheritance relationship
+  if (!readAction { sourceClass.isInheritor(targetClass, true) }) {
+    mcpFail("Class '$sourceClassName' is not a subclass of '$targetClassName'")
+  }
+
+  val processor = readAction {
+    McpTurnRefsToSuperProcessor(project, sourceClass, targetClass, replaceInstanceOf)
+  }
+
+  val usages = readAction { processor.findUsagesPublicly() }
+  val changedFiles = readAction {
+    usages.mapNotNull { usage ->
+      PsiUtilCore.getVirtualFile(usage.element)
+    }.distinct().map { project.projectDirectory.relativizeIfPossible(it) }.sorted()
+  }
+
+  try {
+    withContext(Dispatchers.EDT) {
+      writeIntentReadAction {
+        processor.run()
+      }
+    }
+  }
+  catch (e: TurnRefsToSuperConflictsFoundException) {
+    return UseInterfaceResult(
+      success = false,
+      message = "Replacing references to '$sourceClassName' with '$targetClassName' aborted: ${e.conflicts.size} conflict(s) found",
+      sourceClass = sourceClassName,
+      targetClass = targetClassName,
+      referencesFound = usages.size,
+      conflicts = e.conflicts,
+    )
+  }
+
+  return UseInterfaceResult(
+    success = true,
+    message = "Replaced ${usages.size} reference(s) to '$sourceClassName' with '$targetClassName'.",
+    sourceClass = sourceClassName,
+    targetClass = targetClassName,
+    referencesFound = usages.size,
+    referencesReplaced = usages.size,
+    changedFiles = changedFiles,
+  )
+}
+
+/**
+ * Convert to Instance Method refactoring tool implementation.
+ * Converts a static method to an instance method.
+ */
+@McpTool
+@McpDescription("""
+  Converts a static Java method to an instance method, moving it to the class of one of its
+  parameters or to its own containing class (IntelliJ "Convert to Instance Method" refactoring).
+
+  The static modifier is removed from the method, and the selected parameter (or the containing
+  class) becomes the instance on which the method is invoked. All call sites are updated to use
+  instance invocation syntax.
+
+  Requires:
+      - pathInProject: The relative path to the Java file declaring the method
+      - methodName: The name of the static method to convert
+      - parameterTypes: Parameter types to disambiguate overloaded methods (e.g. ["String", "int"])
+
+  Optional:
+      - targetParameterName: Name of the parameter whose class becomes the containing class.
+        When omitted, the method moves to its own containing class.
+      - newVisibility: New visibility for the instance method (default: keep current visibility)
+
+  Returns a structured result with `success`, the method name, the target class, the number of
+  call sites updated, and the list of changed files. When conversion is not possible (e.g., the
+  method is not static, the target parameter type is not a class), `success` is `false` with the
+  reason in `message`.
+""")
+suspend fun convert_to_instance_method(
+  @McpDescription(Constants.RELATIVE_PATH_IN_PROJECT_DESCRIPTION)
+  pathInProject: String,
+  @McpDescription("Name of the static method to convert")
+  methodName: String,
+  @McpDescription("Parameter types to disambiguate overloaded methods, e.g. [\\"String\\", \\"int\\"]")
+  parameterTypes: List<String>,
+  @McpDescription("Optional name of the parameter whose class becomes the containing class (default: move to own class)")
+  targetParameterName: String? = null,
+  @McpDescription("Optional new visibility for the instance method (default: keep current)")
+  newVisibility: String? = null,
+): ConvertToInstanceMethodResult {
+  currentCoroutineContext().reportToolActivity(McpServerBundle.message("tool.activity.converting.to.instance.method", methodName, pathInProject))
+  val project = currentCoroutineContext().project
+  DumbService.getInstance(project).waitForSmartMode()
+
+  val psiFile = resolveProjectPsiFile(project, pathInProject)
+  if (psiFile !is PsiJavaFile) {
+    mcpFail("Only Java methods can be converted, but '$pathInProject' is not a Java file")
+  }
+
+  val matchingMethods = readAction {
+    findMethodsInFile(psiFile, methodName, parameterTypes)
+  }
+  if (matchingMethods.isEmpty()) {
+    mcpFail("Couldn't find method '$methodName' with parameters $parameterTypes in file '$pathInProject'")
+  }
+  if (matchingMethods.size > 1) {
+    mcpFail("Multiple methods match '$methodName' with parameters $parameterTypes in file '$pathInProject'")
+  }
+  val method = matchingMethods[0]
+
+  if (!readAction { method.hasModifierProperty(PsiModifier.STATIC) }) {
+    return ConvertToInstanceMethodResult(
+      success = false,
+      message = "Method '$methodName' is not static; only static methods can be converted to instance methods.",
+      methodName = methodName,
+    )
+  }
+
+  // Resolve target parameter
+  val targetParameter = readAction {
+    if (targetParameterName != null) {
+      method.parameterList.parameters.find { it.name == targetParameterName }
+        ?: mcpFail("Parameter '$targetParameterName' not found in method '$methodName'")
+    }
+    else null
+  }
+
+  val targetClass = if (targetParameter != null) {
+    readAction {
+      val type = targetParameter.type
+      if (type !is com.intellij.psi.PsiClassType) {
+        mcpFail("Parameter '$targetParameterName' has type '${type.presentableText}' which is not a class type")
+      }
+      type.resolve() ?: mcpFail("Cannot resolve class for parameter '$targetParameterName'")
+    }
+  }
+  else {
+    readAction { method.containingClass } ?: mcpFail("Method '$methodName' is not declared in a class")
+  }
+
+  val processor = readAction {
+    McpConvertToInstanceMethodProcessor(project, method, targetParameter, newVisibility)
+  }
+
+  val usages = readAction { processor.findUsagesPublicly() }
+  val changedFiles = readAction {
+    usages.mapNotNull { usage ->
+      PsiUtilCore.getVirtualFile(usage.element)
+    }.distinct().plusElement(PsiUtilCore.getVirtualFile(method))
+      .mapNotNull { it?.let { file -> project.projectDirectory.relativizeIfPossible(file) } }
+      .sorted()
+  }
+
+  try {
+    withContext(Dispatchers.EDT) {
+      writeIntentReadAction {
+        processor.run()
+      }
+    }
+  }
+  catch (e: ConvertToInstanceMethodConflictsFoundException) {
+    return ConvertToInstanceMethodResult(
+      success = false,
+      message = "Converting method '$methodName' to instance method aborted: ${e.conflicts.size} conflict(s) found",
+      methodName = methodName,
+      conflicts = e.conflicts,
+    )
+  }
+
+  return ConvertToInstanceMethodResult(
+    success = true,
+    message = "Converted static method '$methodName' to instance method of '${targetClass.qualifiedName ?: targetClass.name}'; " +
+              "${usages.size} call site(s) updated.",
+    methodName = methodName,
+    targetClass = targetClass.qualifiedName ?: targetClass.name ?: "<unknown>",
+    callSitesUpdated = usages.size,
+    changedFiles = changedFiles,
+  )
+}
+
+
+/**
+ * Helper to find a class by name in a PSI file.
+ */
+private fun findClassInFile(psiFile: PsiJavaFile, className: String): PsiClass? {
+  return psiFile.classes.find { it.name == className }
+}
+
+/**
+ * TurnRefsToSuperProcessor with UI hooks disabled.
+ */
+private class McpTurnRefsToSuperProcessor(
+  project: Project,
+  sourceClass: PsiClass,
+  targetClass: PsiClass,
+  replaceInstanceOf: Boolean,
+) : TurnRefsToSuperProcessor(project, sourceClass, targetClass, replaceInstanceOf) {
+  
+  override fun isPreviewUsages(usages: Array<out UsageInfo?>): Boolean = false
+  
+  override fun showConflicts(conflicts: MultiMap<PsiElement, String>, usages: Array<out UsageInfo?>?): Boolean {
+    if (conflicts.isEmpty) return true
+    throw TurnRefsToSuperConflictsFoundException(conflicts.values().toList())
+  }
+  
+  fun findUsagesPublicly(): Array<out UsageInfo> = findUsages()
+}
+
+private class TurnRefsToSuperConflictsFoundException(val conflicts: List<String>) : Exception() {
+  override val message: String = "Use Interface Where Possible refactoring found conflicts: ${conflicts.joinToString()}"
+}
+
+/**
+ * ConvertToInstanceMethodProcessor with UI hooks disabled.
+ */
+private class McpConvertToInstanceMethodProcessor(
+  project: Project,
+  method: PsiMethod,
+  targetParameter: PsiParameter?,
+  newVisibility: String?,
+) : ConvertToInstanceMethodProcessor(project, method, targetParameter, newVisibility) {
+  
+  override fun isPreviewUsages(usages: Array<out UsageInfo?>): Boolean = false
+  
+  override fun showConflicts(conflicts: MultiMap<PsiElement, String>, usages: Array<out UsageInfo?>?): Boolean {
+    if (conflicts.isEmpty) return true
+    throw ConvertToInstanceMethodConflictsFoundException(conflicts.values().toList())
+  }
+  
+  fun findUsagesPublicly(): Array<out UsageInfo> = findUsages()
+}
+
+private class ConvertToInstanceMethodConflictsFoundException(val conflicts: List<String>) : Exception() {
+  override val message: String = "Convert to Instance Method refactoring found conflicts: ${conflicts.joinToString()}"
+}
+
+@OptIn(ExperimentalSerializationApi::class)
+@Serializable
+data class ExtractInterfaceResult(
+  val success: Boolean,
+  val message: String,
+  val interfaceName: String,
+  val sourceClass: String,
+  @EncodeDefault val extractedMethods: List<String> = emptyList(),
+  @EncodeDefault val referencesReplaced: Int = 0,
+  val changedFiles: List<String> = emptyList(),
+)
+
+@OptIn(ExperimentalSerializationApi::class)
+@Serializable
+data class UseInterfaceResult(
+  val success: Boolean,
+  val message: String,
+  val sourceClass: String,
+  val targetClass: String,
+  @EncodeDefault val referencesFound: Int = 0,
+  @EncodeDefault val referencesReplaced: Int = 0,
+  val changedFiles: List<String> = emptyList(),
+  val conflicts: List<String> = emptyList(),
+)
+
+@OptIn(ExperimentalSerializationApi::class)
+@Serializable
+data class ConvertToInstanceMethodResult(
+  val success: Boolean,
+  val message: String,
+  val methodName: String,
+  val targetClass: String? = null,
+  @EncodeDefault val callSitesUpdated: Int = 0,
+  val changedFiles: List<String> = emptyList(),
+  val conflicts: List<String> = emptyList(),
 )
