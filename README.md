@@ -67,6 +67,11 @@ Run the following script from project root `<IDEA_HOME>` to get the required mod
 ---
 ## Building IntelliJ IDEA
 
+Build that works for Abhiram:
+```
+./bazel.cmd --host_jvm_args=-Xmx2g run --jobs=4 --worker_max_multiplex_instances=2 -- //build:i_build_target -- --jvm_flag=-Xmx3g
+```
+
 These instructions will help you build IntelliJ IDEA from source code, which is the basis for IntelliJ Platform development.
 
 > [!IMPORTANT]
